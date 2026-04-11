@@ -1,0 +1,653 @@
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <limits>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace nb = nanobind;
+using namespace nb::literals;
+
+namespace {
+
+constexpr int kMaxWindowPoints = 36;
+constexpr double kInfinity = std::numeric_limits<double>::infinity();
+
+struct WindowTargets {
+    int len = 0;
+    std::array<int, kMaxWindowPoints> target_ids{};
+};
+
+struct AssignmentResult {
+    std::vector<std::int64_t> row_ind;
+    std::vector<std::int64_t> col_ind;
+    double total_cost = 0.0;
+};
+
+struct CleanupResult {
+    std::vector<std::int64_t> assignment;
+    std::int64_t passes_completed = 0;
+    double elapsed_s = 0.0;
+    double final_cost = 0.0;
+};
+
+struct WindowSolveResult {
+    int len = 0;
+    bool solved = false;
+    std::array<int, kMaxWindowPoints> point_ids{};
+    std::array<int, kMaxWindowPoints> assigned_target_ids{};
+};
+
+double squared_distance(double ax, double ay, double bx, double by) {
+    const double dx = ax - bx;
+    const double dy = ay - by;
+    return (dx * dx) + (dy * dy);
+}
+
+int resolve_thread_count(int requested, std::size_t max_tasks) {
+    if (requested < 0) {
+        throw std::runtime_error("num_threads must be non-negative");
+    }
+    int thread_count = requested;
+    if (thread_count == 0) {
+        const unsigned int detected = std::thread::hardware_concurrency();
+        thread_count = detected == 0 ? 1 : static_cast<int>(detected);
+    }
+    thread_count = std::max(1, thread_count);
+    if (max_tasks > 0) {
+        thread_count = std::min<int>(thread_count, static_cast<int>(max_tasks));
+    }
+    return thread_count;
+}
+
+AssignmentResult solve_square_jv_dense(const double* cost, std::size_t n) {
+    if (n == 0) {
+        return AssignmentResult{};
+    }
+
+    std::vector<double> u(n, 0.0);
+    std::vector<double> v(n, 0.0);
+    std::vector<double> shortest(n, kInfinity);
+    std::vector<std::int64_t> path(n, -1);
+    std::vector<std::int64_t> col4row(n, -1);
+    std::vector<std::int64_t> row4col(n, -1);
+    std::vector<std::size_t> remaining(n, 0);
+    std::vector<unsigned char> sr(n, 0);
+    std::vector<unsigned char> sc(n, 0);
+
+    for (std::size_t cur_row = 0; cur_row < n; ++cur_row) {
+        double min_val = 0.0;
+        std::size_t i = cur_row;
+        std::size_t num_remaining = n;
+
+        for (std::size_t it = 0; it < n; ++it) {
+            remaining[it] = n - it - 1;
+            shortest[it] = kInfinity;
+            path[it] = -1;
+            sr[it] = 0;
+            sc[it] = 0;
+        }
+
+        std::size_t sink = n;
+        while (sink == n) {
+            std::size_t index = n;
+            double lowest = kInfinity;
+            sr[i] = 1;
+
+            const std::size_t row_offset = i * n;
+            for (std::size_t it = 0; it < num_remaining; ++it) {
+                const std::size_t j = remaining[it];
+                const double reduced_cost = min_val + cost[row_offset + j] - u[i] - v[j];
+                if (reduced_cost < shortest[j]) {
+                    path[j] = static_cast<std::int64_t>(i);
+                    shortest[j] = reduced_cost;
+                }
+                if (shortest[j] < lowest || (shortest[j] == lowest && row4col[j] == -1)) {
+                    lowest = shortest[j];
+                    index = it;
+                }
+            }
+
+            min_val = lowest;
+            if (!std::isfinite(min_val)) {
+                throw std::runtime_error("infeasible assignment");
+            }
+
+            const std::size_t j = remaining[index];
+            if (row4col[j] == -1) {
+                sink = j;
+            } else {
+                i = static_cast<std::size_t>(row4col[j]);
+            }
+            sc[j] = 1;
+            --num_remaining;
+            remaining[index] = remaining[num_remaining];
+        }
+
+        u[cur_row] += min_val;
+        for (std::size_t row = 0; row < n; ++row) {
+            if (sr[row] && row != cur_row) {
+                const std::size_t col = static_cast<std::size_t>(col4row[row]);
+                u[row] += min_val - shortest[col];
+            }
+        }
+        for (std::size_t col = 0; col < n; ++col) {
+            if (sc[col]) {
+                v[col] -= min_val - shortest[col];
+            }
+        }
+
+        std::size_t j = sink;
+        while (true) {
+            const auto row = static_cast<std::size_t>(path[j]);
+            row4col[j] = static_cast<std::int64_t>(row);
+            const auto previous_j = col4row[row];
+            col4row[row] = static_cast<std::int64_t>(j);
+            if (row == cur_row) {
+                break;
+            }
+            j = static_cast<std::size_t>(previous_j);
+        }
+    }
+
+    AssignmentResult result;
+    result.row_ind.resize(n);
+    result.col_ind.resize(n);
+    for (std::size_t row = 0; row < n; ++row) {
+        result.row_ind[row] = static_cast<std::int64_t>(row);
+        result.col_ind[row] = col4row[row];
+        result.total_cost += cost[(row * n) + static_cast<std::size_t>(col4row[row])];
+    }
+    return result;
+}
+
+bool solve_square_jv_small(int n, const double* cost, int* col4row_out) {
+    std::array<double, kMaxWindowPoints> u{};
+    std::array<double, kMaxWindowPoints> v{};
+    std::array<double, kMaxWindowPoints> shortest{};
+    std::array<int, kMaxWindowPoints> path{};
+    std::array<int, kMaxWindowPoints> col4row{};
+    std::array<int, kMaxWindowPoints> row4col{};
+    std::array<int, kMaxWindowPoints> remaining{};
+    std::array<unsigned char, kMaxWindowPoints> sr{};
+    std::array<unsigned char, kMaxWindowPoints> sc{};
+
+    col4row.fill(-1);
+    row4col.fill(-1);
+
+    for (int cur_row = 0; cur_row < n; ++cur_row) {
+        double min_val = 0.0;
+        int i = cur_row;
+        int num_remaining = n;
+        for (int it = 0; it < n; ++it) {
+            remaining[it] = n - it - 1;
+            shortest[it] = kInfinity;
+            path[it] = -1;
+            sr[it] = 0;
+            sc[it] = 0;
+        }
+
+        int sink = -1;
+        while (sink < 0) {
+            int index = -1;
+            double lowest = kInfinity;
+            sr[i] = 1;
+
+            const int row_offset = i * n;
+            for (int it = 0; it < num_remaining; ++it) {
+                const int j = remaining[it];
+                const double reduced_cost = min_val + cost[row_offset + j] - u[i] - v[j];
+                if (reduced_cost < shortest[j]) {
+                    path[j] = i;
+                    shortest[j] = reduced_cost;
+                }
+                if (shortest[j] < lowest || (shortest[j] == lowest && row4col[j] == -1)) {
+                    lowest = shortest[j];
+                    index = it;
+                }
+            }
+
+            min_val = lowest;
+            if (!std::isfinite(min_val)) {
+                return false;
+            }
+
+            const int j = remaining[index];
+            if (row4col[j] == -1) {
+                sink = j;
+            } else {
+                i = row4col[j];
+            }
+            sc[j] = 1;
+            --num_remaining;
+            remaining[index] = remaining[num_remaining];
+        }
+
+        u[cur_row] += min_val;
+        for (int row = 0; row < n; ++row) {
+            if (sr[row] && row != cur_row) {
+                const int col = col4row[row];
+                u[row] += min_val - shortest[col];
+            }
+        }
+        for (int col = 0; col < n; ++col) {
+            if (sc[col]) {
+                v[col] -= min_val - shortest[col];
+            }
+        }
+
+        int j = sink;
+        while (true) {
+            const int row = path[j];
+            row4col[j] = row;
+            const int previous_j = col4row[row];
+            col4row[row] = j;
+            if (row == cur_row) {
+                break;
+            }
+            j = previous_j;
+        }
+    }
+
+    for (int row = 0; row < n; ++row) {
+        col4row_out[row] = col4row[row];
+    }
+    return true;
+}
+
+void build_target_grid(
+    int rows,
+    int cols,
+    double margin,
+    std::vector<double>& target_x,
+    std::vector<double>& target_y
+) {
+    const std::size_t n = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+    target_x.assign(n, 0.0);
+    target_y.assign(n, 0.0);
+
+    std::vector<double> xs(cols, 0.5);
+    std::vector<double> ys(rows, 0.5);
+    if (cols > 1) {
+        const double step = (1.0 - (2.0 * margin)) / static_cast<double>(cols - 1);
+        for (int col = 0; col < cols; ++col) {
+            xs[col] = margin + (step * static_cast<double>(col));
+        }
+    }
+    if (rows > 1) {
+        const double step = (1.0 - (2.0 * margin)) / static_cast<double>(rows - 1);
+        for (int row = 0; row < rows; ++row) {
+            ys[row] = margin + (step * static_cast<double>(row));
+        }
+    }
+
+    for (int row = 0; row < rows; ++row) {
+        const int row_offset = row * cols;
+        for (int col = 0; col < cols; ++col) {
+            const int target_id = row_offset + col;
+            target_x[target_id] = xs[col];
+            target_y[target_id] = ys[row];
+        }
+    }
+}
+
+std::vector<WindowTargets> build_phase_windows(int rows, int cols, int window_rows, int window_cols, int row_phase, int col_phase) {
+    std::vector<WindowTargets> windows;
+    int row_start = std::min(row_phase, rows - 1);
+    while (true) {
+        const int row_end = std::min(row_start + window_rows, rows);
+        int col_start = std::min(col_phase, cols - 1);
+        while (true) {
+            const int col_end = std::min(col_start + window_cols, cols);
+            WindowTargets window;
+            for (int row = row_start; row < row_end; ++row) {
+                const int row_offset = row * cols;
+                for (int col = col_start; col < col_end; ++col) {
+                    window.target_ids[window.len++] = row_offset + col;
+                }
+            }
+            windows.push_back(window);
+            if (col_end == cols) {
+                break;
+            }
+            col_start += window_cols;
+        }
+        if (row_end == rows) {
+            break;
+        }
+        row_start += window_rows;
+    }
+    return windows;
+}
+
+CleanupResult run_cleanup(
+    const double* points,
+    std::size_t n,
+    const std::int64_t* initial_assignment,
+    int rows,
+    int cols,
+    double budget_seconds,
+    int window_size,
+    double margin,
+    int fixed_suffix_count,
+    int num_threads
+) {
+    if (static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) != n) {
+        throw std::runtime_error("rows * cols must equal the number of points");
+    }
+    if (window_size <= 0 || window_size > 6) {
+        throw std::runtime_error("window_size must be in the range [1, 6] for the current native kernel");
+    }
+    if (fixed_suffix_count < 0 || fixed_suffix_count > static_cast<int>(n)) {
+        throw std::runtime_error("fixed_suffix_count must be in [0, n]");
+    }
+    if (num_threads < 0) {
+        throw std::runtime_error("num_threads must be non-negative");
+    }
+
+    std::vector<double> ax(n, 0.0);
+    std::vector<double> ay(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        ax[i] = points[(2 * i) + 0];
+        ay[i] = points[(2 * i) + 1];
+    }
+
+    std::vector<int> assignment(n, -1);
+    std::vector<int> owner(n, -1);
+    for (std::size_t point_id = 0; point_id < n; ++point_id) {
+        const auto target_id = static_cast<int>(initial_assignment[point_id]);
+        if (target_id < 0 || target_id >= static_cast<int>(n)) {
+            throw std::runtime_error("initial_assignment contains out-of-range target ids");
+        }
+        assignment[point_id] = target_id;
+        owner[static_cast<std::size_t>(target_id)] = static_cast<int>(point_id);
+    }
+
+    std::vector<double> target_x;
+    std::vector<double> target_y;
+    build_target_grid(rows, cols, margin, target_x, target_y);
+    const int fixed_start = static_cast<int>(n) - fixed_suffix_count;
+
+    const int half = std::max(1, window_size / 2);
+    std::array<std::vector<WindowTargets>, 4> phases = {
+        build_phase_windows(rows, cols, window_size, window_size, 0, 0),
+        build_phase_windows(rows, cols, window_size, window_size, 0, half),
+        build_phase_windows(rows, cols, window_size, window_size, half, 0),
+        build_phase_windows(rows, cols, window_size, window_size, half, half),
+    };
+
+    auto start = std::chrono::steady_clock::now();
+    std::int64_t rounds = 0;
+    for (;;) {
+        for (const auto& phase : phases) {
+            std::vector<WindowSolveResult> results(phase.size());
+            std::atomic<int> phase_failed{0};
+            std::mutex worker_exception_mutex;
+            std::exception_ptr worker_exception;
+            const int thread_count = resolve_thread_count(num_threads, phase.size());
+            auto solve_window_range = [&](std::size_t begin, std::size_t end) {
+                try {
+                    for (std::size_t window_idx = begin; window_idx < end; ++window_idx) {
+                        if (phase_failed.load(std::memory_order_relaxed) != 0) {
+                            return;
+                        }
+                        const auto& window = phase[window_idx];
+                        WindowSolveResult local;
+                        std::array<int, kMaxWindowPoints> active_targets{};
+                        for (int i = 0; i < window.len; ++i) {
+                            const int target_id = window.target_ids[i];
+                            if (target_id < fixed_start) {
+                                active_targets[local.len++] = target_id;
+                            }
+                        }
+                        if (local.len <= 1) {
+                            results[window_idx] = local;
+                            continue;
+                        }
+
+                        std::array<double, kMaxWindowPoints * kMaxWindowPoints> cost{};
+                        std::array<int, kMaxWindowPoints> col4row{};
+                        for (int i = 0; i < local.len; ++i) {
+                            const int target_id = active_targets[i];
+                            const int point_id = owner[static_cast<std::size_t>(target_id)];
+                            local.point_ids[static_cast<std::size_t>(i)] = point_id;
+                            const double px = ax[static_cast<std::size_t>(point_id)];
+                            const double py = ay[static_cast<std::size_t>(point_id)];
+                            const int row_offset = i * local.len;
+                            for (int j = 0; j < local.len; ++j) {
+                                const int target_j = active_targets[j];
+                                cost[static_cast<std::size_t>(row_offset + j)] = squared_distance(
+                                    px,
+                                    py,
+                                    target_x[static_cast<std::size_t>(target_j)],
+                                    target_y[static_cast<std::size_t>(target_j)]
+                                );
+                            }
+                        }
+
+                        if (!solve_square_jv_small(local.len, cost.data(), col4row.data())) {
+                            phase_failed.store(1, std::memory_order_relaxed);
+                            return;
+                        }
+
+                        local.solved = true;
+                        for (int i = 0; i < local.len; ++i) {
+                            local.assigned_target_ids[static_cast<std::size_t>(i)] =
+                                active_targets[static_cast<std::size_t>(col4row[static_cast<std::size_t>(i)])];
+                        }
+                        results[window_idx] = local;
+                    }
+                } catch (...) {
+                    phase_failed.store(1, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(worker_exception_mutex);
+                    if (!worker_exception) {
+                        worker_exception = std::current_exception();
+                    }
+                }
+            };
+
+            if (thread_count == 1) {
+                solve_window_range(0, phase.size());
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(static_cast<std::size_t>(thread_count));
+                const std::size_t base_chunk = phase.size() / static_cast<std::size_t>(thread_count);
+                const std::size_t remainder = phase.size() % static_cast<std::size_t>(thread_count);
+                std::size_t begin = 0;
+                for (int thread_idx = 0; thread_idx < thread_count; ++thread_idx) {
+                    const std::size_t extra = static_cast<std::size_t>(thread_idx) < remainder ? 1 : 0;
+                    const std::size_t end = begin + base_chunk + extra;
+                    workers.emplace_back(solve_window_range, begin, end);
+                    begin = end;
+                }
+                for (auto& worker : workers) {
+                    worker.join();
+                }
+            }
+
+            if (worker_exception) {
+                std::rethrow_exception(worker_exception);
+            }
+
+            if (phase_failed.load(std::memory_order_relaxed) != 0) {
+                throw std::runtime_error("window LAP failed");
+            }
+
+            for (const auto& solved : results) {
+                if (!solved.solved) {
+                    continue;
+                }
+                for (int i = 0; i < solved.len; ++i) {
+                    const int point_id = solved.point_ids[static_cast<std::size_t>(i)];
+                    const int target_id = solved.assigned_target_ids[static_cast<std::size_t>(i)];
+                    assignment[static_cast<std::size_t>(point_id)] = target_id;
+                    owner[static_cast<std::size_t>(target_id)] = point_id;
+                }
+            }
+        }
+
+        ++rounds;
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed_s = std::chrono::duration<double>(now - start).count();
+        if (elapsed_s >= budget_seconds) {
+            double final_cost = 0.0;
+            const int reduction_threads = resolve_thread_count(num_threads, n);
+            if (reduction_threads == 1) {
+                for (std::size_t point_id = 0; point_id < n; ++point_id) {
+                    const int target_id = assignment[point_id];
+                    final_cost += squared_distance(
+                        ax[point_id],
+                        ay[point_id],
+                        target_x[static_cast<std::size_t>(target_id)],
+                        target_y[static_cast<std::size_t>(target_id)]
+                    );
+                }
+            } else {
+                std::vector<double> partial_sums(static_cast<std::size_t>(reduction_threads), 0.0);
+                std::vector<std::thread> workers;
+                workers.reserve(static_cast<std::size_t>(reduction_threads));
+                const std::size_t base_chunk = n / static_cast<std::size_t>(reduction_threads);
+                const std::size_t remainder = n % static_cast<std::size_t>(reduction_threads);
+                std::size_t begin = 0;
+                for (int thread_idx = 0; thread_idx < reduction_threads; ++thread_idx) {
+                    const std::size_t extra = static_cast<std::size_t>(thread_idx) < remainder ? 1 : 0;
+                    const std::size_t end = begin + base_chunk + extra;
+                    workers.emplace_back([&, begin, end, thread_idx]() {
+                        double partial = 0.0;
+                        for (std::size_t point_id = begin; point_id < end; ++point_id) {
+                            const int target_id = assignment[point_id];
+                            partial += squared_distance(
+                                ax[point_id],
+                                ay[point_id],
+                                target_x[static_cast<std::size_t>(target_id)],
+                                target_y[static_cast<std::size_t>(target_id)]
+                            );
+                        }
+                        partial_sums[static_cast<std::size_t>(thread_idx)] = partial;
+                    });
+                    begin = end;
+                }
+                for (auto& worker : workers) {
+                    worker.join();
+                }
+                for (double partial : partial_sums) {
+                    final_cost += partial;
+                }
+            }
+            CleanupResult result;
+            result.assignment.assign(assignment.begin(), assignment.end());
+            result.passes_completed = rounds;
+            result.elapsed_s = elapsed_s;
+            result.final_cost = final_cost;
+            return result;
+        }
+    }
+}
+
+std::vector<std::int64_t> make_identity_rows(std::size_t n) {
+    std::vector<std::int64_t> rows(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        rows[i] = static_cast<std::int64_t>(i);
+    }
+    return rows;
+}
+
+}  // namespace
+
+NB_MODULE(_core, m) {
+    m.doc() = "Native dense LAP and window cleanup kernels";
+
+    m.def(
+        "_linear_sum_assignment",
+        [](nb::ndarray<const double, nb::numpy, nb::c_contig> cost_matrix) {
+            if (cost_matrix.ndim() != 2) {
+                throw std::runtime_error("cost_matrix must be 2D");
+            }
+            const std::size_t rows = cost_matrix.shape(0);
+            const std::size_t cols = cost_matrix.shape(1);
+            if (rows != cols) {
+                throw std::runtime_error("cost_matrix must be square");
+            }
+            const auto* cost = static_cast<const double*>(cost_matrix.data());
+            AssignmentResult result;
+            {
+                nb::gil_scoped_release release;
+                result = solve_square_jv_dense(cost, rows);
+            }
+            return nb::make_tuple(result.row_ind, result.col_ind, result.total_cost);
+        },
+        "cost_matrix"_a,
+        "Solve a dense square LAP with a native JV backend."
+    );
+
+    m.def(
+        "_window_cleanup",
+        [](nb::ndarray<const double, nb::numpy, nb::c_contig> points,
+           nb::ndarray<const std::int64_t, nb::numpy, nb::c_contig> initial_assignment,
+           int rows,
+           int cols,
+           double budget_seconds,
+           int window_size,
+           double margin,
+           int fixed_suffix_count,
+           int num_threads) {
+            if (points.ndim() != 2 || points.shape(1) != 2) {
+                throw std::runtime_error("points must have shape (n, 2)");
+            }
+            if (initial_assignment.ndim() != 1) {
+                throw std::runtime_error("initial_assignment must be 1D");
+            }
+            const std::size_t n = points.shape(0);
+            if (initial_assignment.shape(0) != n) {
+                throw std::runtime_error("initial_assignment must have length n");
+            }
+            const auto* point_ptr = static_cast<const double*>(points.data());
+            const auto* assignment_ptr = static_cast<const std::int64_t*>(initial_assignment.data());
+            CleanupResult result;
+            {
+                nb::gil_scoped_release release;
+                result = run_cleanup(
+                    point_ptr,
+                    n,
+                    assignment_ptr,
+                    rows,
+                    cols,
+                    budget_seconds,
+                    window_size,
+                    margin,
+                    fixed_suffix_count,
+                    num_threads
+                );
+            }
+            nb::dict out;
+            out["assignment"] = nb::cast(result.assignment);
+            out["passes_completed"] = nb::int_(result.passes_completed);
+            out["elapsed_s"] = nb::float_(result.elapsed_s);
+            out["final_cost"] = nb::float_(result.final_cost);
+            return out;
+        },
+        "points"_a,
+        "initial_assignment"_a,
+        "rows"_a,
+        "cols"_a,
+        "budget_seconds"_a,
+        "window_size"_a = 6,
+        "margin"_a = 0.03,
+        "fixed_suffix_count"_a = 0,
+        "num_threads"_a = 0,
+        "Run native window cleanup from an initial assignment."
+    );
+}

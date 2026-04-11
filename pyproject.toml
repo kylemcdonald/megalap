@@ -1,0 +1,74 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.10",
+  "nanobind>=2.4",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "megalap"
+version = "0.1.0"
+description = "Native dense LAP and windowed cleanup kernels for point-to-grid assignment."
+readme = "README_PYPI.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "numpy>=1.26",
+]
+authors = [
+  { name = "Kyle McDonald" },
+]
+keywords = ["assignment", "lap", "point-cloud", "grid", "jv"]
+urls = { Homepage = "https://github.com/kylemcdonald/megalap", Repository = "https://github.com/kylemcdonald/megalap", Issues = "https://github.com/kylemcdonald/megalap/issues" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: C++",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+examples = [
+  "matplotlib>=3.8",
+]
+test = [
+  "pytest>=8.3",
+]
+release = [
+  "build>=1.2",
+  "cibuildwheel>=3.0",
+  "twine>=5.1",
+]
+
+[tool.scikit-build]
+wheel.packages = ["python/megalap"]
+build-dir = ".scikit-build/{wheel_tag}"
+
+[tool.scikit-build.sdist]
+exclude = [
+  "build/**",
+  ".scikit-build/**",
+  ".venv*/**",
+  ".pytest_cache/**",
+  "dist/**",
+  "examples/__pycache__/**",
+  "examples/basic_usage_output.png",
+  "python/megalap/__pycache__/**",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "pp* *-win32"
+test-command = "pytest {project}/tests -q"
+test-requires = ["pytest>=8.3"]

@@ -1,0 +1,12 @@
+.DS_Store
+.pytest_cache/
+.scikit-build/
+.venv*/
+build/
+dist/
+wheelhouse/
+
+__pycache__/
+*.py[cod]
+
+examples/basic_usage_output.png
