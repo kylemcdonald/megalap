@@ -69,6 +69,6 @@ testpaths = ["tests"]
 
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
-skip = "pp* *-win32 cp3??t-*"
+skip = "*-win32 cp3??t-*"
 test-command = "pytest {project}/tests -q"
 test-requires = ["pytest>=8.3"]

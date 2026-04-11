@@ -42,6 +42,8 @@ jobs:
   build-wheels:
     name: Build wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
     strategy:
       fail-fast: false
       matrix:
