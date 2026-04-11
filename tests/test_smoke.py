@@ -35,7 +35,7 @@ def test_snap_to_grid_returns_unique_assignment_for_non_rectangular_count() -> N
         dtype=np.float64,
     )
 
-    grid_points, assignment, grid_size = megalap.snap_to_grid(points)
+    grid_points, assignment, grid_size = megalap.snap_to_grid(points, cleanup_seconds=0.0)
 
     assert grid_points.shape == points.shape
     assert assignment.shape == (points.shape[0],)

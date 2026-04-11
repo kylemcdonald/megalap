@@ -6,7 +6,7 @@ The public API is intentionally small:
 
 1. `linear_sum_assignment(cost_matrix)`
 2. `window_cleanup(points, initial_assignment, rows, cols, budget_seconds, ...)`
-3. `snap_to_grid(points, width=None, height=None, cleanup_seconds=0.0, ...)`
+3. `snap_to_grid(points, width=None, height=None, cleanup_seconds=30.0, ...)`
 
 ## Showcase
 
@@ -81,7 +81,7 @@ Returns a Python `dict` with:
 - `elapsed_s`
 - `final_cost`
 
-### `snap_to_grid(points, width=None, height=None, cleanup_seconds=0.0, window_size=6, margin=0.03, num_threads=None)`
+### `snap_to_grid(points, width=None, height=None, cleanup_seconds=30.0, window_size=6, margin=0.03, num_threads=None)`
 
 High-level point-cloud wrapper.
 
@@ -92,7 +92,8 @@ Behavior:
 - if no exact factorization exists in that range, chooses a near-square enclosing grid in that same band
 - pads with edge ghost points when the grid has more cells than real points
 - runs the native JV LAP
-- optionally runs cleanup afterward
+- runs `30s` of cleanup by default
+- set `cleanup_seconds=0.0` to disable cleanup
 - passes `num_threads` through to the native cleanup kernel
 
 Returns three values:

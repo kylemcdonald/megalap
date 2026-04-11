@@ -122,7 +122,7 @@ def snap_to_grid(
     points,
     width: int | None = None,
     height: int | None = None,
-    cleanup_seconds: float = 0.0,
+    cleanup_seconds: float = 30.0,
     window_size: int = 6,
     margin: float = 0.03,
     num_threads: int | None = None,
