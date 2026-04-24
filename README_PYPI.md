@@ -6,7 +6,7 @@ The public API has three functions:
 
 1. `linear_sum_assignment(cost_matrix)`
 2. `window_cleanup(points, initial_assignment, rows, cols, budget_seconds, ...)`
-3. `snap_to_grid(points, width=None, height=None, cleanup_seconds=30.0, ...)`
+3. `snap_to_grid(points, width=None, height=None, cleanup_seconds=None, ...)`
 
 ## Install
 
@@ -51,7 +51,7 @@ Returns a dict with:
 - `elapsed_s`
 - `final_cost`
 
-### `snap_to_grid(points, width=None, height=None, cleanup_seconds=30.0, ...)`
+### `snap_to_grid(points, width=None, height=None, cleanup_seconds=None, ...)`
 
 High-level wrapper for snapping a 2D point cloud onto a destination grid.
 
@@ -61,8 +61,10 @@ Behavior:
 - prefers exact rectangular sizes with aspect ratio in `[1:1, 2:1]`
 - falls back to a near-square enclosing grid in that same band when exact factors do not exist
 - pads with edge ghost points when the chosen grid has more cells than real points
-- runs the native LAP solver and `30s` of cleanup by default
-- set `cleanup_seconds=0.0` to disable cleanup
+- uses the native auction LAP solver by default when the padded assignment problem has fewer than `10000` cells
+- uses the native iterative cleanup solver for `10s` by default when the padded assignment problem has `10000` cells or more
+- pass `cleanup_seconds` to override the default iterative budget; `cleanup_seconds=0.0` disables cleanup
+- pass `exact_point_limit` to adjust the automatic exact/iterative threshold
 
 Returns:
 

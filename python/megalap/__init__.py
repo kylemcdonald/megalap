@@ -4,9 +4,18 @@ import math
 
 import numpy as np
 
-from ._core import _linear_sum_assignment, _window_cleanup
+from ._core import _auction_grid_assignment, _linear_sum_assignment, _window_cleanup
 
-__all__ = ["linear_sum_assignment", "window_cleanup", "snap_to_grid"]
+DEFAULT_EXACT_POINT_LIMIT = 10_000
+DEFAULT_ITERATIVE_SECONDS = 10.0
+
+__all__ = [
+    "DEFAULT_EXACT_POINT_LIMIT",
+    "DEFAULT_ITERATIVE_SECONDS",
+    "linear_sum_assignment",
+    "window_cleanup",
+    "snap_to_grid",
+]
 
 
 def _build_target_grid(width: int, height: int, margin: float) -> np.ndarray:
@@ -75,6 +84,26 @@ def linear_sum_assignment(cost_matrix):
     )
 
 
+def _auction_grid_lap(points: np.ndarray, rows: int, cols: int, margin: float) -> np.ndarray:
+    _, col_ind, _ = _auction_grid_assignment(points, int(rows), int(cols), float(margin))
+    return np.asarray(col_ind, dtype=np.int64)
+
+
+def _seed_grid_assignment(points: np.ndarray, ghost_count: int) -> np.ndarray:
+    n_total = int(points.shape[0])
+    n_real = n_total - int(ghost_count)
+    assignment = np.empty(n_total, dtype=np.int64)
+
+    if n_real > 0:
+        order = np.lexsort((points[:n_real, 0], points[:n_real, 1]))
+        assignment[order] = np.arange(n_real, dtype=np.int64)
+
+    if ghost_count:
+        assignment[n_real:] = np.arange(n_real, n_total, dtype=np.int64)
+
+    return assignment
+
+
 def _normalize_num_threads(num_threads: int | None) -> int:
     if num_threads is None:
         return 0
@@ -122,10 +151,11 @@ def snap_to_grid(
     points,
     width: int | None = None,
     height: int | None = None,
-    cleanup_seconds: float = 30.0,
+    cleanup_seconds: float | None = None,
     window_size: int = 6,
     margin: float = 0.03,
     num_threads: int | None = None,
+    exact_point_limit: int = DEFAULT_EXACT_POINT_LIMIT,
 ):
     pts = np.asarray(points, dtype=np.float64, order="C")
     if pts.ndim != 2 or pts.shape[1] != 2:
@@ -156,17 +186,20 @@ def snap_to_grid(
     else:
         augmented_points = pts
 
-    diffs = augmented_points[:, None, :] - target_points[None, :, :]
-    cost_matrix = np.sum(diffs * diffs, axis=2, dtype=np.float64)
-    _, assignment, _ = linear_sum_assignment(cost_matrix)
+    if total_cells < int(exact_point_limit):
+        assignment = _auction_grid_lap(augmented_points, rows=height, cols=width, margin=margin)
+        cleanup_budget = 0.0 if cleanup_seconds is None else float(cleanup_seconds)
+    else:
+        assignment = _seed_grid_assignment(augmented_points, ghost_count)
+        cleanup_budget = DEFAULT_ITERATIVE_SECONDS if cleanup_seconds is None else float(cleanup_seconds)
 
-    if cleanup_seconds > 0.0:
+    if cleanup_budget > 0.0:
         cleanup = window_cleanup(
             augmented_points,
             assignment,
             rows=height,
             cols=width,
-            budget_seconds=cleanup_seconds,
+            budget_seconds=cleanup_budget,
             window_size=window_size,
             margin=margin,
             num_threads=num_threads,

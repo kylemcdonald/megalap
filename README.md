@@ -6,7 +6,7 @@ The public API is intentionally small:
 
 1. `linear_sum_assignment(cost_matrix)`
 2. `window_cleanup(points, initial_assignment, rows, cols, budget_seconds, ...)`
-3. `snap_to_grid(points, width=None, height=None, cleanup_seconds=30.0, ...)`
+3. `snap_to_grid(points, width=None, height=None, cleanup_seconds=None, ...)`
 
 ## Showcase
 
@@ -81,7 +81,7 @@ Returns a Python `dict` with:
 - `elapsed_s`
 - `final_cost`
 
-### `snap_to_grid(points, width=None, height=None, cleanup_seconds=30.0, window_size=6, margin=0.03, num_threads=None)`
+### `snap_to_grid(points, width=None, height=None, cleanup_seconds=None, window_size=6, margin=0.03, num_threads=None, exact_point_limit=10000)`
 
 High-level point-cloud wrapper.
 
@@ -91,10 +91,11 @@ Behavior:
 - prefers exact rectangular sizes with aspect ratio in `[1:1, 2:1]`
 - if no exact factorization exists in that range, chooses a near-square enclosing grid in that same band
 - pads with edge ghost points when the grid has more cells than real points
-- runs the native JV LAP
-- runs `30s` of cleanup by default
-- set `cleanup_seconds=0.0` to disable cleanup
+- when the padded assignment problem has fewer than `10000` cells, runs the native auction LAP solver by default
+- when the padded assignment problem has `10000` cells or more, skips dense exact assignment and runs the native iterative cleanup solver for `10s` by default
+- pass `cleanup_seconds` to override the default iterative budget; `cleanup_seconds=0.0` disables cleanup
 - passes `num_threads` through to the native cleanup kernel
+- pass `exact_point_limit` to adjust the automatic exact/iterative threshold
 
 Returns three values:
 
@@ -152,6 +153,7 @@ So the default threaded path improved cleanup throughput by about `10.3x` on tha
 
 - `linear_sum_assignment()` currently expects a square cost matrix.
 - `snap_to_grid()` handles non-rectangular point counts by padding with visible ghost points along the trailing edge of the chosen destination grid.
+- `snap_to_grid()` uses the padded grid size, not just the number of input points, when deciding whether the default path should be exact or iterative.
 - The cleanup kernel uses overlapping windows of at most `6x6`, so the native small-JV kernel is specialized for up to `36` points per window.
 - The native cleanup kernel uses standard C++ threads and does not depend on OpenMP.
 - GitHub Actions builds release artifacts for Linux, macOS, and Windows wheels, plus an sdist.

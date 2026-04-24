@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "megalap"
-version = "0.1.1"
+version = "0.1.2"
 description = "Native dense LAP and windowed cleanup kernels for point-to-grid assignment."
 readme = "README_PYPI.md"
 requires-python = ">=3.10"
@@ -19,7 +19,7 @@ dependencies = [
 authors = [
   { name = "Kyle McDonald" },
 ]
-keywords = ["assignment", "lap", "point-cloud", "grid", "jv"]
+keywords = ["assignment", "lap", "point-cloud", "grid", "auction", "jv"]
 urls = { Homepage = "https://github.com/kylemcdonald/megalap", Repository = "https://github.com/kylemcdonald/megalap", Issues = "https://github.com/kylemcdonald/megalap/issues" }
 classifiers = [
   "Programming Language :: Python :: 3",

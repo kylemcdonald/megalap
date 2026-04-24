@@ -174,6 +174,91 @@ AssignmentResult solve_square_jv_dense(const double* cost, std::size_t n) {
     return result;
 }
 
+void build_target_grid(
+    int rows,
+    int cols,
+    double margin,
+    std::vector<double>& target_x,
+    std::vector<double>& target_y
+);
+
+AssignmentResult solve_square_auction_grid(const double* points, std::size_t n, int rows, int cols, double margin) {
+    if (n == 0) {
+        return AssignmentResult{};
+    }
+    if (static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) != n) {
+        throw std::runtime_error("rows * cols must equal the number of points");
+    }
+
+    std::vector<double> ax(n, 0.0);
+    std::vector<double> ay(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        ax[i] = points[(2 * i) + 0];
+        ay[i] = points[(2 * i) + 1];
+    }
+
+    std::vector<double> target_x;
+    std::vector<double> target_y;
+    build_target_grid(rows, cols, margin, target_x, target_y);
+
+    std::vector<double> price(n, 0.0);
+    std::vector<std::int64_t> col4row(n, -1);
+    std::vector<std::int64_t> row4col(n, -1);
+    std::vector<std::int64_t> unassigned(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        unassigned[i] = static_cast<std::int64_t>(n - i - 1);
+    }
+
+    const double epsilon = 1e-9;
+    while (!unassigned.empty()) {
+        const auto row = static_cast<std::size_t>(unassigned.back());
+        unassigned.pop_back();
+
+        double best_value = kInfinity;
+        double second_best_value = kInfinity;
+        std::size_t best_col = n;
+
+        for (std::size_t col = 0; col < n; ++col) {
+            const double value = squared_distance(ax[row], ay[row], target_x[col], target_y[col]) + price[col];
+            if (value < best_value) {
+                second_best_value = best_value;
+                best_value = value;
+                best_col = col;
+            } else if (value < second_best_value) {
+                second_best_value = value;
+            }
+        }
+
+        if (best_col == n || !std::isfinite(best_value)) {
+            throw std::runtime_error("auction assignment failed");
+        }
+
+        const double bid_increment = std::isfinite(second_best_value)
+            ? (second_best_value - best_value) + epsilon
+            : epsilon;
+        price[best_col] += bid_increment;
+
+        const std::int64_t previous_row = col4row[best_col];
+        col4row[best_col] = static_cast<std::int64_t>(row);
+        row4col[row] = static_cast<std::int64_t>(best_col);
+        if (previous_row >= 0) {
+            row4col[static_cast<std::size_t>(previous_row)] = -1;
+            unassigned.push_back(previous_row);
+        }
+    }
+
+    AssignmentResult result;
+    result.row_ind.resize(n);
+    result.col_ind.resize(n);
+    for (std::size_t row = 0; row < n; ++row) {
+        const auto col = static_cast<std::size_t>(row4col[row]);
+        result.row_ind[row] = static_cast<std::int64_t>(row);
+        result.col_ind[row] = static_cast<std::int64_t>(col);
+        result.total_cost += squared_distance(ax[row], ay[row], target_x[col], target_y[col]);
+    }
+    return result;
+}
+
 bool solve_square_jv_small(int n, const double* cost, int* col4row_out) {
     std::array<double, kMaxWindowPoints> u{};
     std::array<double, kMaxWindowPoints> v{};
@@ -591,6 +676,31 @@ NB_MODULE(_core, m) {
         },
         "cost_matrix"_a,
         "Solve a dense square LAP with a native JV backend."
+    );
+
+    m.def(
+        "_auction_grid_assignment",
+        [](nb::ndarray<const double, nb::numpy, nb::c_contig> points,
+           int rows,
+           int cols,
+           double margin) {
+            if (points.ndim() != 2 || points.shape(1) != 2) {
+                throw std::runtime_error("points must have shape (n, 2)");
+            }
+            const std::size_t n = points.shape(0);
+            const auto* point_ptr = static_cast<const double*>(points.data());
+            AssignmentResult result;
+            {
+                nb::gil_scoped_release release;
+                result = solve_square_auction_grid(point_ptr, n, rows, cols, margin);
+            }
+            return nb::make_tuple(result.row_ind, result.col_ind, result.total_cost);
+        },
+        "points"_a,
+        "rows"_a,
+        "cols"_a,
+        "margin"_a = 0.03,
+        "Solve a point-to-grid LAP with a native auction backend."
     );
 
     m.def(
